@@ -1,8 +1,5 @@
 streamlit
-num2words
-datetime
-pypandoc
-python-docx==0.8.11
-PyMuPDF
+pymupdf
 PyPDF2
 inflect
+num2words
