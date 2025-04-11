@@ -1,151 +1,170 @@
 import streamlit as st
-import pandas as pd
-import math
-from pathlib import Path
+from io import BytesIO
+import pypandoc
+from num2words import num2words  # 用于将数字转换为英文大写
+from datetime import datetime
+import pandoc  # PyMuPDF
+import os
+from PyPDF2 import PdfReader, PdfWriter
 
-# Set the title and favicon that appear in the Browser's tab bar.
-st.set_page_config(
-    page_title='GDP dashboard',
-    page_icon=':earth_americas:', # This is an emoji shortcode. Could be a URL too.
-)
+def fill_pdf(data,text_parts):
+    pdf = fitz.open("Late Notice.pdf")
 
-# -----------------------------------------------------------------------------
-# Declare some useful functions.
+    for page_num in range(len(pdf)):
+        page = pdf[page_num]
+        for key, value in data.items():
+            value = str(value)  # 确保值是字符串
+            search_term = f"{{{{{key}}}}}"  # 占位符格式
 
-@st.cache_data
-def get_gdp_data():
-    """Grab GDP data from a CSV file.
+            # 查找占位符位置
+            matches = page.search_for(search_term)
+            for match in matches:
+                rect = match  # 获取占位符的矩形区域
+                # 用白色矩形覆盖占位符区域
+                page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
+                is_bold = False
+                is_underlined = False
 
-    This uses caching to avoid having to read the file every time. If we were
-    reading from an HTTP endpoint instead of a file, it's a good idea to set
-    a maximum age to the cache with the TTL argument: @st.cache_data(ttl='1d')
+                for part in text_parts:
+                    if part[0] == key:
+                        is_bold = part[1]
+                        is_underlined = part[2]
+                fontname = "Times-Bold" if is_bold else "Times-Roman"
+
+                # 插入新的文本，确保字体大小适应
+                page.insert_text(
+                    (rect.x0,rect.y1-2.5),  # 插入文本的位置是占位符的左上角
+                    value,
+                    fontsize=12,  # 自动计算的字体大小
+                    fontname=fontname,  # 字体名称
+                    color=(0, 0, 0)  # 黑色文本
+                )
+                if is_underlined:
+                    text_width = fitz.get_text_length(value, fontsize=12, fontname=fontname)
+                    underline_y = rect.y1   # 下划线稍微低于文本基线
+                    page.draw_line(
+                        (rect.x0, underline_y),  # 起点
+                        (rect.x0 + text_width, underline_y),  # 终点
+                        color=(0, 0, 0),  # 黑色线条
+                        width=1.5  # 下划线宽度
+                    )
+
+    # 保存修改后的 PDF
+    buffer = BytesIO()
+    pdf.save(buffer)
+    buffer.seek(0)  # 重置缓冲区指针
+    pdf.close()
+    return buffer
+
+# Function to merge PDFs
+def merge_pdfs(generated_pdf, uploaded_pdf):
+    writer = PdfWriter()
+
+    # Add pages from the generated PDF
+    generated_reader = PdfReader(generated_pdf)
+    for page in generated_reader.pages:
+        writer.add_page(page)
+
+    # Add pages from the uploaded PDF
+    uploaded_reader = PdfReader(uploaded_pdf)
+    for page in uploaded_reader.pages:
+        writer.add_page(page)
+
+    # Save the merged PDF to a BytesIO buffer
+    output_buffer = BytesIO()
+    writer.write(output_buffer)
+    output_buffer.seek(0)
+    return output_buffer
+
+
+
+# Streamlit 界面
+st.title("Late Notice Generator")
+last_name = st.text_input("Last Name")
+full_name = st.text_input("Full Name")
+st.caption("Format:Last Name,First Name(Ex:Di,Zhongyue)")
+address = st.text_area("Address")
+st.caption("1138 W 38th St - Rm 3 (Do not include city,state or post code)")
+postal = st.text_input("Postal Code")
+title = st.selectbox("Title", ["Mr.", "Ms."])
+amount = st.number_input("Amount", min_value=0.0, format="%.2f")
+formatted_amount = "{:,.2f}".format(amount)
+uploaded_file = st.file_uploader("Upload Tenant Ledger", type="pdf")
+
+import inflect
+
+def format_amount_in_words(amount):
     """
+    将金额格式化为英文形式，并转换为单词形式。 
+    例如 1234.56 转换为 'One Thousand Two Hundred Thirty-Four Dollars and 56/100 Cents'
+    
+    :param amount: float, 输入的金额
+    :return: str, 格式化后的金额字符串
+    """
+    p = inflect.engine()
 
-    # Instead of a CSV on disk, you could read from an HTTP endpoint here too.
-    DATA_FILENAME = Path(__file__).parent/'data/gdp_data.csv'
-    raw_gdp_df = pd.read_csv(DATA_FILENAME)
+    # 拆分整数部分和小数部分
+    dollars = int(amount)
+    cents = int(round((amount - dollars) * 100))
 
-    MIN_YEAR = 1960
-    MAX_YEAR = 2022
+    # 将整数部分转化为英文单词
+    dollar_words = p.number_to_words(dollars).replace(",", "")  # 移除逗号
+    
+    # 将金额转换为每个单词首字母大写
+    dollar_words = dollar_words.title()  # 移除逗号
+    
+    # 创建最终格式化字符串
+    if cents == 0:
+        return f"{dollar_words} Dollars"
+    else:
+        return f"{dollar_words} Dollars and {cents}/100 Cents"
+amount_word = format_amount_in_words(amount)        
+def amount_to_words(amount):
+    return num2words(amount, to='currency', lang='en', currency ='USD').title()
+amount_words = amount_to_words(amount)
 
-    # The data above has columns like:
-    # - Country Name
-    # - Country Code
-    # - [Stuff I don't care about]
-    # - GDP for 1960
-    # - GDP for 1961
-    # - GDP for 1962
-    # - ...
-    # - GDP for 2022
-    #
-    # ...but I want this instead:
-    # - Country Name
-    # - Country Code
-    # - Year
-    # - GDP
-    #
-    # So let's pivot all those year-columns into two: Year and GDP
-    gdp_df = raw_gdp_df.melt(
-        ['Country Code'],
-        [str(x) for x in range(MIN_YEAR, MAX_YEAR + 1)],
-        'Year',
-        'GDP',
-    )
+def get_current_date():
+    now = datetime.now()
+    return now.strftime("%B %d, %Y")
+current_date = get_current_date()
+    
+data = {
+    "Full Name": full_name,
+    "Last Name": last_name,
+    "Address": address,
+    "Postal": postal,
+    "gen": title,
+    "Amount Words":f"{current_date} is {amount_word} (${str(formatted_amount)}).",
+    "Date":current_date,
+    "DateB":f"{current_date} for your reference.",
+    "Full Address":f"{address}, Los Angeles, CA, {postal}",
+    "gender": f"{title}{last_name},"
+}
 
-    # Convert years from string to integers
-    gdp_df['Year'] = pd.to_numeric(gdp_df['Year'])
-
-    return gdp_df
-
-gdp_df = get_gdp_data()
-
-# -----------------------------------------------------------------------------
-# Draw the actual page
-
-# Set the title that appears at the top of the page.
-'''
-# :earth_americas: GDP dashboard
-
-Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) website. As you'll
-notice, the data only goes to 2022 right now, and datapoints for certain years are often missing.
-But it's otherwise a great (and did I mention _free_?) source of data.
-'''
-
-# Add some spacing
-''
-''
-
-min_value = gdp_df['Year'].min()
-max_value = gdp_df['Year'].max()
-
-from_year, to_year = st.slider(
-    'Which years are you interested in?',
-    min_value=min_value,
-    max_value=max_value,
-    value=[min_value, max_value])
-
-countries = gdp_df['Country Code'].unique()
-
-if not len(countries):
-    st.warning("Select at least one country")
-
-selected_countries = st.multiselect(
-    'Which countries would you like to view?',
-    countries,
-    ['DEU', 'FRA', 'GBR', 'BRA', 'MEX', 'JPN'])
-
-''
-''
-''
-
-# Filter the data
-filtered_gdp_df = gdp_df[
-    (gdp_df['Country Code'].isin(selected_countries))
-    & (gdp_df['Year'] <= to_year)
-    & (from_year <= gdp_df['Year'])
+text_parts = [
+    ("Full Name", False, False),
+    ("Last Name", False, False),
+    ("Address", False, False),
+    ("Postal", False, False),
+    ("Amount Words", True, True),
+    ("Date", False, False),
+    ("DateB", False, False),
+    ("Full Address", True, False),
+    ("gender", False, False),
 ]
 
-st.header('GDP over time', divider='gray')
-
-''
-
-st.line_chart(
-    filtered_gdp_df,
-    x='Year',
-    y='GDP',
-    color='Country Code',
-)
-
-''
-''
-
-
-first_year = gdp_df[gdp_df['Year'] == from_year]
-last_year = gdp_df[gdp_df['Year'] == to_year]
-
-st.header(f'GDP in {to_year}', divider='gray')
-
-''
-
-cols = st.columns(4)
-
-for i, country in enumerate(selected_countries):
-    col = cols[i % len(cols)]
-
-    with col:
-        first_gdp = first_year[first_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-        last_gdp = last_year[last_year['Country Code'] == country]['GDP'].iat[0] / 1000000000
-
-        if math.isnan(first_gdp):
-            growth = 'n/a'
-            delta_color = 'off'
-        else:
-            growth = f'{last_gdp / first_gdp:,.2f}x'
-            delta_color = 'normal'
-
-        st.metric(
-            label=f'{country} GDP',
-            value=f'{last_gdp:,.0f}B',
-            delta=growth,
-            delta_color=delta_color
+# 生成 PDF
+if st.button("生成 PDF"):
+    if not uploaded_file:
+        st.warning("Please upload a PDF to merge.")
+    else:
+        # Generate filled PDF
+        generated_pdf = fill_pdf(data, text_parts)
+        merged_pdf = merge_pdfs(generated_pdf, uploaded_file)
+        st.success("PDF 生成成功！")
+        st.download_button(
+            label="Download Merged PDF",
+            data=merged_pdf,
+            file_name=f"Late Notice - {full_name}.pdf",
+            mime="application/pdf",
         )
