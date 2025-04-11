@@ -1,2 +1,8 @@
 streamlit
-pandas
+num2words
+datetime
+pypandoc
+python-docx==0.8.11
+PyMuPDF
+PyPDF2
+inflect
